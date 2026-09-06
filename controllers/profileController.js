@@ -1,15 +1,18 @@
 const bcrypt = require('bcrypt');
 const pool = require('../db');
 
-// Ensure privacy columns exist. Run once when this module is loaded.
-(async function ensurePrivacyColumns() {
+const ensurePrivacyColumns = async () => {
   try {
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS show_activity boolean DEFAULT true`);
     await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS allow_mentions boolean DEFAULT true`);
+    // Ensure notification preferences column exists (JSONB to store structured prefs)
+    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS notification_preferences jsonb DEFAULT '{}'::jsonb`);
   } catch (err) {
     console.error('Error ensuring privacy columns exist:', err);
   }
-})();
+};
+
+exports.ensurePrivacyColumns = ensurePrivacyColumns;
 
 exports.getProfile = async (req, res) => {
   const result = await pool.query(`SELECT * FROM users WHERE id=$1`, [req.user.userId]);

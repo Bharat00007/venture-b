@@ -175,13 +175,34 @@ const setupChatHandlers = (io) => {
         }
     });
 
-    socket.on('joinCommunity', ({ communityId, userId }) => {
+    socket.on('joinCommunity', async ({ communityId, userId }, callback) => {
       if (!communityId || !userId) return;
       socket.join(communityId);
       socket.userId = userId; // store on socket for disconnect handling
       registerOnlineUser(userId, socket.id);
       if (!userCommunities[userId]) userCommunities[userId] = new Set();
       userCommunities[userId].add(communityId);
+
+      // Add user to Redis online set for this community and publish presence
+      try {
+        const setKey = `community:${communityId}:online`;
+        await redisClient.sAdd(setKey, String(userId));
+        const payload = JSON.stringify({ userId: String(userId), status: 'online', communityId });
+        // publish so other server instances can relay the status to their connected sockets
+        await redisClient.publish(`presence:community:${communityId}`, payload);
+        // get authoritative list from Redis and emit back to this socket
+        try {
+          const redisMembers = await redisClient.sMembers(setKey);
+          if (Array.isArray(redisMembers)) {
+            socket.emit('communityOnlineUsers', { communityId, userIds: redisMembers });
+            if (typeof callback === 'function') callback({ communityId, userIds: redisMembers });
+          }
+        } catch (err) {
+          // ignore redis members error
+        }
+      } catch (err) {
+        console.error('Error updating Redis presence on joinCommunity', err);
+      }
       if (offlineTimeouts[userId]) {
         clearTimeout(offlineTimeouts[userId]);
         delete offlineTimeouts[userId];
@@ -196,8 +217,21 @@ const setupChatHandlers = (io) => {
 
     socket.on('requestCommunityOnlineUsers', ({ communityId }) => {
       if (!communityId) return;
-      const onlineUserIds = Object.keys(userCommunities).filter(uid => userCommunities[uid] && userCommunities[uid].has(communityId));
-      socket.emit('communityOnlineUsers', { communityId, userIds: onlineUserIds });
+      // Prefer authoritative list from Redis if available
+      (async () => {
+        try {
+          const setKey = `community:${communityId}:online`;
+          const redisMembers = await redisClient.sMembers(setKey);
+          if (Array.isArray(redisMembers)) {
+            socket.emit('communityOnlineUsers', { communityId, userIds: redisMembers });
+            return;
+          }
+        } catch (err) {
+          // fallback to in-memory mapping
+        }
+        const onlineUserIds = Object.keys(userCommunities).filter(uid => userCommunities[uid] && userCommunities[uid].has(communityId));
+        socket.emit('communityOnlineUsers', { communityId, userIds: onlineUserIds });
+      })();
     });
 
     // Allow a socket to request the current online status for a specific userId
@@ -213,7 +247,7 @@ const setupChatHandlers = (io) => {
         unregisterOnlineUser(userId);
         if (userCommunities[userId]) {
           // Delay offline emit
-          offlineTimeouts[userId] = setTimeout(() => {
+          offlineTimeouts[userId] = setTimeout(async () => {
             try {
               const communities = userCommunities[userId];
               if (communities) {
@@ -221,14 +255,39 @@ const setupChatHandlers = (io) => {
                 if (communities instanceof Set) {
                   for (const communityId of communities) {
                     io.to(communityId).emit('userStatus', { userId, status: 'offline' });
+                    // Remove from Redis set and publish offline
+                    try {
+                      const setKey = `community:${communityId}:online`;
+                      await redisClient.sRem(setKey, String(userId));
+                      const payload = JSON.stringify({ userId: String(userId), status: 'offline', communityId });
+                      await redisClient.publish(`presence:community:${communityId}`, payload);
+                    } catch (err) {
+                      console.error('Error removing Redis presence on disconnect', err);
+                    }
                   }
                 } else if (Array.isArray(communities)) {
                   for (const communityId of communities) {
                     io.to(communityId).emit('userStatus', { userId, status: 'offline' });
+                    try {
+                      const setKey = `community:${communityId}:online`;
+                      await redisClient.sRem(setKey, String(userId));
+                      const payload = JSON.stringify({ userId: String(userId), status: 'offline', communityId });
+                      await redisClient.publish(`presence:community:${communityId}`, payload);
+                    } catch (err) {
+                      console.error('Error removing Redis presence on disconnect', err);
+                    }
                   }
                 } else if (typeof communities === 'object') {
                   for (const communityId of Object.keys(communities)) {
                     io.to(communityId).emit('userStatus', { userId, status: 'offline' });
+                    try {
+                      const setKey = `community:${communityId}:online`;
+                      await redisClient.sRem(setKey, String(userId));
+                      const payload = JSON.stringify({ userId: String(userId), status: 'offline', communityId });
+                      await redisClient.publish(`presence:community:${communityId}`, payload);
+                    } catch (err) {
+                      console.error('Error removing Redis presence on disconnect', err);
+                    }
                   }
                 }
               }

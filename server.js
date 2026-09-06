@@ -19,11 +19,17 @@ const { redisClient, connectRedis } = require('./redis/redisClient');
 const { createSubscriber } = require('./redis/pubsub');
 const { setupChatHandlers } = require('./socket/chatHandler');
 const { Server } = require('socket.io');
+const { ensurePrivacyColumns } = require('./controllers/profileController');
+
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:8080')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true },
   maxHttpBufferSize: 200 * 1024 * 1024,
 });
 
@@ -39,7 +45,7 @@ subscriber.on('error', (err) => console.error('Redis Subscriber Error', err));
 setupChatHandlers(io);
 
 app.use(cors({
-  origin: 'http://localhost:8080',
+  origin: allowedOrigins,
   credentials: true, 
 }));
 app.use(express.json({ limit: '1gb' }));
@@ -84,29 +90,36 @@ const createTables = async () => {
     // await pool.query(`DROP TABLE IF EXISTS post_views CASCADE`);
 
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email VARCHAR(255) UNIQUE NOT NULL,
-        username VARCHAR(255) NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        role VARCHAR(50),
-        company_name VARCHAR(255),
-        industry VARCHAR(255),
-        years_experience VARCHAR(10),
-        bio TEXT,
-        location TEXT,
-        avatar_url TEXT
-        )
-      `);
+  CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
 
-      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT FALSE`);
-      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verification_token TEXT`);
-      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_token TEXT`);
-      await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_expires TIMESTAMP`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nda_signed_name VARCHAR(255)`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nda_signature_image BYTEA`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nda_signed_at TIMESTAMP DEFAULT NULL`);
-    await pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS nda_document_url TEXT`);
+    email VARCHAR(255) UNIQUE NOT NULL,
+    username VARCHAR(255) NOT NULL,
+    password VARCHAR(255) NOT NULL,
+
+    role VARCHAR(50),
+    company_name VARCHAR(255),
+    industry VARCHAR(255),
+    years_experience VARCHAR(10),
+
+    bio TEXT,
+    location TEXT,
+    avatar_url TEXT,
+
+    address TEXT,
+    contact_no VARCHAR(20),
+
+    is_verified BOOLEAN DEFAULT FALSE,
+    email_verification_token TEXT,
+    password_reset_token TEXT,
+    password_reset_expires TIMESTAMP,
+
+    nda_signed_name VARCHAR(255),
+    nda_signature_image BYTEA,
+    nda_signed_at TIMESTAMP DEFAULT NULL,
+    nda_document_url TEXT
+  )
+`);  
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS refresh_tokens (
@@ -118,17 +131,6 @@ const createTables = async () => {
         created_at TIMESTAMP DEFAULT NOW()
       )
     `);
-
-    // Ensure bio and location columns exist (for old databases)
-
-
-    // await pool.query(`
-    //   CREATE TABLE IF NOT EXISTS authors (
-    //     id SERIAL PRIMARY KEY,
-    //     name VARCHAR(100),
-    //     avatar TEXT
-    //   )
-    // `);
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS posts (
@@ -306,7 +308,22 @@ const startServer = async () => {
       }
     });
 
+    // Presence propagation: subscribe to presence events published when users join/leave
+    await subscriber.pSubscribe('presence:community:*', (message, channel) => {
+      try {
+        const match = channel.match(/^presence:community:(.+)$/);
+        if (!match) return;
+        const communityId = match[1];
+        const payload = JSON.parse(message);
+        // Broadcast the userStatus to all sockets in the community room
+        io.to(communityId).emit('userStatus', { userId: payload.userId, status: payload.status });
+      } catch (err) {
+        console.error('Error handling presence message', err);
+      }
+    });
+
     await createTables();
+    await ensurePrivacyColumns();
 
     const PORT = process.env.PORT || 5000;
     server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

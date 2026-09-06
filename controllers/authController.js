@@ -7,7 +7,10 @@ const pool = require('../db'); // Assuming you have a db.js file for database co
 const uploadFilesToR2 = require('../utilities/uploadFilesToR2');
 const { generateAccessToken, generateRefreshToken, verifyRefreshToken, generateEmailToken, generatePasswordResetToken } = require('../utilities/tokenUtils');
 const { sendVerificationEmail, sendWelcomeEmail, sendPasswordResetEmail } = require('../utilities/emailUtils');
-// const dotenv = require('dotenv');
+
+// Auth flow uses short-lived JWT access tokens and DB-backed refresh tokens.
+// Refresh tokens are revoked on logout; access token validity is limited by expiry.
+// Immediate invalidation of a currently held access token requires a blacklist or token-version strategy.
 
 // const REFRESH_TOKEN_EXPIRY = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -30,12 +33,36 @@ exports.register = async (req, res) => {
     ndaDocumentHtml,
   } = req.body;
 
-  if (!email || !username || !password || !role) {
-    return res.status(400).json({ error: 'Missing required fields' });
+  const missingFields = [];
+  if (!email) missingFields.push('email');
+  if (!username) missingFields.push('username');
+  if (!password) missingFields.push('password');
+  if (!role) missingFields.push('role');
+  if (!address) missingFields.push('address');
+  if (!contactNo) missingFields.push('contactNo');
+  if (!ndaSignedName) missingFields.push('ndaSignedName');
+  if (!ndaSignatureImage) missingFields.push('ndaSignatureImage');
+  if (!ndaSignedAt) missingFields.push('ndaSignedAt');
+  if (!ndaSignedTime) missingFields.push('ndaSignedTime');
+  if (!ndaIpAddress) missingFields.push('ndaIpAddress');
+
+  if (missingFields.length > 0) {
+    return res.status(400).json({
+      success: false,
+      message: `Missing required registration data: ${missingFields.join(', ')}`,
+      error: { code: 'INVALID_INPUT' },
+      data: {},
+    });
   }
 
-  if (!ndaSignedName || !ndaSignatureImage || !ndaSignedAt || !ndaSignedTime || !ndaIpAddress || !address || !contactNo || (typeof contactNo === 'string' && contactNo.trim() === '')) {
-    return res.status(400).json({ error: 'NDA signing info, address and contact number are required' });
+  const normalizedContactNo = typeof contactNo === 'string' ? contactNo.trim() : contactNo;
+  if (!normalizedContactNo) {
+    return res.status(400).json({
+      success: false,
+      message: 'Contact number cannot be empty',
+      error: { code: 'INVALID_INPUT' },
+      data: {},
+    });
   }
 
   try {
@@ -45,7 +72,12 @@ exports.register = async (req, res) => {
     );
 
     if (existingUser.rows.length > 0) {
-      return res.status(409).json({ error: 'Email or username already exists' });
+      return res.status(409).json({
+        success: false,
+        message: 'Email or username already exists',
+        error: { code: 'EMAIL_EXISTS' },
+        data: {},
+      });
     }
 
     const hashed = await bcrypt.hash(password, 10);
@@ -86,7 +118,12 @@ exports.register = async (req, res) => {
 
     const user = insertUser.rows[0];
     if (!user) {
-      return res.status(500).json({ error: 'User registration failed' });
+      return res.status(500).json({
+        success: false,
+        message: 'User registration failed',
+        error: { code: 'SERVER_ERROR' },
+        data: {},
+      });
     }
 
     const ipAddress = (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim();
@@ -267,13 +304,27 @@ exports.register = async (req, res) => {
       }
     } catch (emailErr) {
       console.error('Failed to send verification email:', emailErr);
-      return res.status(500).json({ error: 'Failed to send verification email' });
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to send verification email',
+        error: { code: 'EMAIL_SEND_ERROR' },
+        data: {},
+      });
     }
 
-    return res.status(201).json({ message: 'Registration successful. Please verify your email.', ndaDocumentUrl });
+    return res.status(201).json({
+      success: true,
+      message: 'Registration successful. Please verify your email.',
+      data: { ndaDocumentUrl },
+    });
   } catch (err) {
     console.error('Registration error:', err);
-    return res.status(500).json({ error: 'Server error during registration' });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error during registration',
+      error: { code: 'SERVER_ERROR' },
+      data: {},
+    });
   }
 };
 
@@ -281,7 +332,12 @@ exports.verifyEmail = async (req, res) => {
   const { token } = req.query;
 
   if (!token) {
-    return res.status(400).json({ error: 'Verification token is required' });
+    return res.status(400).json({
+      success: false,
+      message: 'Verification token is required',
+      error: { code: 'MISSING_TOKEN' },
+      data: {},
+    });
   }
 
   try {
@@ -294,13 +350,27 @@ exports.verifyEmail = async (req, res) => {
     );
 
     if (result.rowCount === 0) {
-      return res.status(400).json({ error: 'Invalid or expired verification token' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification token',
+        error: { code: 'INVALID_TOKEN' },
+        data: {},
+      });
     }
 
-    return res.status(200).json({ message: 'Email verified successfully' });
+    return res.status(200).json({
+      success: true,
+      message: 'Email verified successfully',
+      data: {},
+    });
   } catch (err) {
     console.error('Email verification error:', err);
-    return res.status(500).json({ error: 'Server error during email verification' });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error during email verification',
+      error: { code: 'SERVER_ERROR' },
+      data: {},
+    });
   }
 };
 
@@ -309,7 +379,12 @@ exports.login = async (req, res) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required' });
+      return res.status(400).json({
+        success: false,
+        message: 'Email and password are required',
+        error: { code: 'MISSING_CREDENTIALS' },
+        data: {},
+      });
     }
 
     const result = await pool.query(
@@ -319,7 +394,12 @@ exports.login = async (req, res) => {
 
     const user = result.rows[0];
     if (!user) {
-      return res.status(403).json({ error: 'Invalid credentials' });
+      return res.status(401).json({
+        success: false,
+        message: 'Account with that email does not exist',
+        error: { code: 'ACCOUNT_NOT_FOUND' },
+        data: {},
+      });
     }
 
     let storedHash = user.password;
@@ -332,11 +412,21 @@ exports.login = async (req, res) => {
 
     const isValid = await bcrypt.compare(password, storedHash);
     if (!isValid) {
-      return res.status(403).json({ error: 'Invalid credentials' });
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid credentials',
+        error: { code: 'INVALID_CREDENTIALS' },
+        data: {},
+      });
     }
 
     if (!user.is_verified) {
-      return res.status(403).json({ error: 'Please verify your email before logging in.' });
+      return res.status(403).json({
+        success: false,
+        message: 'Please verify your email before logging in.',
+        error: { code: 'EMAIL_NOT_VERIFIED' },
+        data: {},
+      });
     }
 
     const accessToken = generateAccessToken({ userId: user.id, role: user.role });
@@ -347,7 +437,7 @@ exports.login = async (req, res) => {
       [user.id, refreshToken]
     );
 
-    res
+    return res
       .cookie('refreshToken', refreshToken, {
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
@@ -355,16 +445,31 @@ exports.login = async (req, res) => {
         path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       })
-      .json({ accessToken });
+      .status(200)
+      .json({
+        success: true,
+        message: 'Login successful',
+        data: { accessToken },
+      });
   } catch (err) {
     console.error('Login error:', err);
-    return res.status(500).json({ error: 'Server error' });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: { code: 'SERVER_ERROR' },
+      data: {},
+    });
   }
 };
 
 exports.refresh = async (req, res) => {
   const { refreshToken } = req.cookies;
-  if (!refreshToken) return res.status(401).json({ error: 'No refresh token provided' });
+  if (!refreshToken) return res.status(401).json({
+    success: false,
+    message: 'No refresh token provided',
+    error: { code: 'NO_REFRESH_TOKEN' },
+    data: {},
+  });
 
   try {
     const payload = verifyRefreshToken(refreshToken);
@@ -373,32 +478,83 @@ exports.refresh = async (req, res) => {
       [refreshToken]
     );
 
-    if (result.rowCount === 0) return res.status(401).json({ error: 'Invalid refresh token' });
+    if (result.rowCount === 0) return res.status(401).json({
+      success: false,
+      message: 'Invalid refresh token',
+      error: { code: 'INVALID_REFRESH_TOKEN' },
+      data: {},
+    });
     const accessToken = generateAccessToken({ userId: payload.userId, role: payload.role });
 
-    res.json({ accessToken });
+    return res.status(200).json({
+      success: true,
+      message: 'Token refreshed',
+      data: { accessToken },
+    });
   } catch (err) {
-    res.status(401).json({ error: 'Invalid refresh token' });
+    return res.status(401).json({
+      success: false,
+      message: 'Invalid refresh token',
+      error: { code: 'INVALID_REFRESH_TOKEN' },
+      data: {},
+    });
   }
 };
 
 exports.logout = async (req, res) => {
   const { refreshToken } = req.cookies;
-  if (!refreshToken) return res.status(400).json({ error: 'No refresh token provided' });
+  if (!refreshToken) return res.status(401).json({
+    success: false,
+    message: 'No refresh token provided',
+    error: { code: 'NO_REFRESH_TOKEN' },
+    data: {},
+  });
 
-  await pool.query(`UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1`, [refreshToken]);
+  try {
+    await pool.query(
+      `UPDATE refresh_tokens SET revoked = TRUE WHERE token = $1`,
+      [refreshToken]
+    );
+  } catch (err) {
+    console.error('Logout error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to revoke refresh token',
+      error: { code: 'SERVER_ERROR' },
+      data: {},
+    });
+  }
 
-  res.clearCookie('refreshToken', { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production' });
-  res.json({ message: 'Logged out successfully' });
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/',
+  });
+  return res.status(200).json({
+    success: true,
+    message: 'Logged out successfully',
+    data: {},
+  });
 };
 
 exports.sendPasswordReset = async (req, res) => {
   const { email } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email is required' });
+  if (!email) return res.status(400).json({
+    success: false,
+    message: 'Email is required',
+    error: { code: 'INVALID_INPUT' },
+    data: {},
+  });
 
   const result = await pool.query(`SELECT * FROM users WHERE email = $1`, [email]);
   const user = result.rows[0];
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user) return res.status(404).json({
+    success: false,
+    message: 'User not found',
+    error: { code: 'USER_NOT_FOUND' },
+    data: {},
+  });
 
   const resetToken = generatePasswordResetToken();
   await pool.query(
@@ -406,7 +562,11 @@ exports.sendPasswordReset = async (req, res) => {
     [resetToken, user.id]
   );
   await sendPasswordResetEmail(email, resetToken);
-  res.json({ message: 'Password reset email sent' });
+  return res.status(200).json({
+    success: true,
+    message: 'Password reset email sent',
+    data: {},
+  });
 };
 
 exports.resetPassword = async (req, res) => {
@@ -417,12 +577,21 @@ exports.resetPassword = async (req, res) => {
   );
   
   const user = result.rows[0];
-  if (!user) return res.status(400).json({ error: 'Invalid or expired token' });
+  if (!user) return res.status(401).json({
+    success: false,
+    message: 'Invalid or expired token',
+    error: { code: 'INVALID_TOKEN' },
+    data: {},
+  });
 
   const hashed = await bcrypt.hash(newPassword, 10);
   await pool.query(
     `UPDATE users SET password = $1, password_reset_token = NULL, password_reset_expires = NULL WHERE id = $2`,
     [hashed, user.id]
   );
-  res.json({ message: 'Password reset successful' });
+  return res.status(200).json({
+    success: true,
+    message: 'Password reset successful',
+    data: {},
+  });
 };

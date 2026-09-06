@@ -400,6 +400,13 @@ exports.incrementViewCount = async (req, res) => {
         [postId, userId]
       );
     } else {
+      await pool.query(
+        `UPDATE post_views
+         SET timestamp = NOW()
+         WHERE post_id = $1 AND user_id = $2`,
+        [postId, userId]
+      );
+      
       console.log(`User ${userId} has already viewed post ${postId}, not incrementing view count`);
     }
 
